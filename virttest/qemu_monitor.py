@@ -763,20 +763,6 @@ class Monitor(object):
             old_progress = progress
             time.sleep(0.1)
 
-    def _get_migrate_capability(self, capability, disable_auto_x_evaluation=True):
-        """
-        Verify the $capability is listed in migrate-capabilities. If not try
-        x-/non-x- version. In case none is supported, return the original param
-
-        :param capability: migrate capability
-        :param disable_auto_x_evaluation: Whether to automatically choose
-                                          feature with/without "x-" prefix
-        :return: migrate parameter that is hopefully supported
-        """
-        return pick_supported_x_feature(
-            capability, self._supported_migrate_capabilities, disable_auto_x_evaluation
-        )
-
     def _get_migrate_parameter(
         self, parameter, error_on_missing=False, disable_auto_x_evaluation=True
     ):
@@ -1582,62 +1568,6 @@ class HumanMonitor(Monitor):
         normalize_data_size = utils_misc.normalize_data_size
         size = float(normalize_data_size("%sB" % size, "M", "1024"))
         return self.cmd("balloon %d" % size)
-
-    def _get_migrate_capability(self, capability, disable_auto_x_evaluation=True):
-        if self._supported_migrate_capabilities is None:
-            ret = self.query("migrate_capabilities")
-            caps = []
-            for line in ret.splitlines():
-                split = line.split(":", 1)
-                if len(split) == 2:
-                    caps.append(split[0])
-            self._supported_migrate_capabilities = caps
-        return super(HumanMonitor, self)._get_migrate_capability(
-            capability, disable_auto_x_evaluation
-        )
-
-    def set_migrate_capability(self, state, capability, disable_auto_x_evaluation=True):
-        """
-        Set the capability of migrate to state.
-
-        :param state: Bool value of capability.
-        :param capability: capability which need to set.
-        :param disable_auto_x_evaluation: Whether to automatically choose
-                                          feature with/without "x-" prefix
-        :raise MonitorNotSupportedMigCapError: if the capability is unknown
-        """
-        cmd = "migrate_set_capability"
-        self.verify_supported_cmd(cmd)
-        value = "off"
-        if state:
-            value = "on"
-        capability = self._get_migrate_capability(capability, disable_auto_x_evaluation)
-        cmd += " %s %s" % (capability, value)
-        result = self.cmd(cmd)
-        if result != "":
-            raise MonitorNotSupportedMigCapError(
-                "Failed to set capability" "%s: %s" % (capability, result)
-            )
-        return result
-
-    def get_migrate_capability(self, capability, disable_auto_x_evaluation=True):
-        """
-        Get the state of migrate-capability.
-
-        :param capability: capability which need to get.
-        :param disable_auto_x_evaluation: Whether to automatically choose
-                                          feature with/without "x-" prefix
-        :raise MonitorNotSupportedMigCapError: if the capability is unknown
-        :return: the state of migrate-capability.
-        """
-        capability_info = self.query("migrate_capabilities")
-        capability = self._get_migrate_capability(capability, disable_auto_x_evaluation)
-        pattern = r"%s:\s+(on|off)" % capability
-        match = re.search(pattern, capability_info, re.M)
-        if match is None:
-            raise MonitorNotSupportedMigCapError("Unknown capability %s" % capability)
-        value = match.group(1)
-        return value == "on"
 
     def set_migrate_cache_size(self, value):
         """
@@ -3053,76 +2983,6 @@ class QMPMonitor(Monitor):
         if not utils_misc.wait_for(lambda: self.get_event(qmp_event), 120):
             raise QMPEventError(cmd, qmp_event, self.vm.name, self.name)
         LOG.info("%s QMP event received" % qmp_event)
-
-    def _get_migrate_capability(self, capability, disable_auto_x_evaluation=True):
-        if self._supported_migrate_capabilities is None:
-            ret = self.query("migrate-capabilities")
-            self._supported_migrate_capabilities = set(_["capability"] for _ in ret)
-        return super(QMPMonitor, self)._get_migrate_capability(
-            capability, disable_auto_x_evaluation
-        )
-
-    def set_migrate_capability(self, state, capability, disable_auto_x_evaluation=True):
-        """
-        Set the capability of migrate to state.
-
-        :param state: Bool value of capability.
-        :param capability: capability which need to set.
-        :param disable_auto_x_evaluation: Whether to automatically choose
-                                          feature with/without "x-" prefix
-        :raise MonitorNotSupportedMigCapError: if the capability is unsettable
-        """
-        capability = self._get_migrate_capability(capability, disable_auto_x_evaluation)
-        cmd = "migrate-set-capabilities"
-        self.verify_supported_cmd(cmd)
-        args = {"capabilities": [{"state": state, "capability": capability}]}
-        # If the capability doesn't exist or can't be used in this situation
-        # we'll get a GenericError with text explaining, but it's not always
-        # clear if it's another reason for the error
-        try:
-            return self.cmd(cmd, args)
-        except QMPCmdError as exc:
-            if disable_auto_x_evaluation:
-                raise
-            # Try it again with/without "x-" prefix
-            capability2 = x_non_x_feature(capability)
-            args = {"capabilities": [{"state": state, "capability": capability2}]}
-            try:
-                return self.cmd(cmd, args)
-            except QMPCmdError as exc2:
-                LOG.debug("Error in set_migrate_capability for %s: %s", capability, exc)
-                LOG.debug(
-                    "Error in set_migrate_capability for %s: " "%s", capability2, exc2
-                )
-                if exc.data["class"] == exc2.data["class"] == "GenericError":
-                    msg = "set capability failed for %s (%s) as well as %s " "(%s)" % (
-                        capability,
-                        exc,
-                        capability2,
-                        exc2,
-                    )
-                    raise MonitorNotSupportedMigCapError(msg)
-                else:  # raise the non-generic-error exception
-                    if exc.data["class"] == "GenericError":
-                        raise exc2
-                    else:
-                        raise exc
-
-    def get_migrate_capability(self, capability, disable_auto_x_evaluation=True):
-        """
-        Get the state of migrate-capability.
-
-        :param capability: capability which need to get.
-        :return: the state of migrate-capability.
-        :note: automatically checks for "x-"/non-"x-" variant of the cap.
-        :raise MonitorNotSupportedMigCapError: if the capability is unknown
-        """
-        capability = self._get_migrate_capability(capability, disable_auto_x_evaluation)
-        capability_infos = self.query("migrate-capabilities")
-        for item in capability_infos:
-            if item["capability"] == capability:
-                return item["state"]
-        raise MonitorNotSupportedMigCapError("Unknown capability %s" % capability)
 
     def set_migrate_cache_size(self, value):
         """
